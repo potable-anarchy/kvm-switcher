@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+# kvm-switch — hand the Alienware AW3926QW's keyboard/mouse (and, if needed,
+# the screen) to the *other* computer. Same script on Linux and macOS.
+#
+#   kvm-switch            toggle to the other machine (bind this to a hotkey)
+#   kvm-switch status     show PBP state, active input, and who owns USB
+#
+# How it works (DDC/CI, discovered on this monitor):
+#   VCP 0xE9  PBP mode   0x00 = off, non-zero (0x24) = PBP on
+#   VCP 0xE7  KVM        writing 0xFF00 toggles USB upstream (write-only)
+#   VCP 0x60  input      0x0F = DisplayPort-1 (Linux), 0x1B = USB-C (Mac)
+#
+# PBP on  -> toggle the KVM only; both pictures stay on screen.
+# PBP off -> switch the input to the other machine; the KVM follows it.
+set -euo pipefail
+
+LINUX_INPUT=${KVM_LINUX_INPUT:-0x0f}   # DisplayPort-1
+MAC_INPUT=${KVM_MAC_INPUT:-0x1b}       # USB-C
+KVM_TOGGLE=0xff00
+MODEL=${KVM_MODEL:-AW3926QW}
+M1DDC_DISPLAY=${KVM_M1DDC_DISPLAY:-}   # e.g. "display 2" if the Mac has several monitors
+
+OS=$(uname -s)
+log() { echo "kvm-switch: $*" >&2; }
+
+notify() {
+  case $OS in
+    Linux)  command -v notify-send >/dev/null && notify-send -a kvm-switch -t 1500 "KVM" "$1" || true ;;
+    Darwin) osascript -e "display notification \"$1\" with title \"KVM\"" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# --- backends ---------------------------------------------------------------
+# vcp_get <code>  -> prints current value as a decimal integer
+# vcp_set <code> <value>
+if [[ $OS == Linux ]]; then
+  command -v ddcutil >/dev/null || { log "ddcutil not found"; exit 1; }
+  # Finding the monitor by model costs ~1s per call, so cache its I2C bus.
+  BUS_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/kvm-switch.bus
+  find_bus() {
+    ddcutil detect --brief 2>/dev/null | awk -v m="$MODEL" '
+      /I2C bus:/ { bus=$NF; sub(".*-", "", bus) } $0 ~ m { print bus; exit }'
+  }
+  BUS=${KVM_BUS:-$(cat "$BUS_CACHE" 2>/dev/null || true)}
+  if [[ -z $BUS ]]; then
+    BUS=$(find_bus); [[ -n $BUS ]] || { log "monitor $MODEL not found"; exit 1; }
+    mkdir -p "$(dirname "$BUS_CACHE")"; echo "$BUS" >"$BUS_CACHE"
+  fi
+  # Fast DDC timing first; on failure re-detect the bus and retry at normal speed.
+  ddc() {
+    ddcutil --bus "$BUS" --sleep-multiplier 0.3 --noverify "$@" 2>/dev/null && return
+    BUS=$(find_bus); echo "$BUS" >"$BUS_CACHE"
+    ddcutil --bus "$BUS" --noverify "$@"
+  }
+  vcp_get() {
+    # "VCP E9 CNC x00 xff x00 x24" (non-continuous) or "VCP 60 SNC x0f"
+    local out; out=$(ddc getvcp "$1" --brief)
+    local hi lo; read -r hi lo < <(awk '{ if (NF>=7) print $(NF-1), $NF; else print "x00", $NF }' <<<"$out")
+    echo $(( 16#${hi#x} * 256 + 16#${lo#x} ))
+  }
+  vcp_set() { ddc setvcp "$1" "$2"; }
+  OTHER_INPUT=$MAC_INPUT; OTHER_NAME=Mac
+elif [[ $OS == Darwin ]]; then
+  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"   # hotkey daemons get a bare PATH
+  command -v m1ddc >/dev/null || { log "m1ddc not found (brew install m1ddc)"; exit 1; }
+  # m1ddc only knows named controls; map the codes we use.
+  m1name() { case $1 in e9) echo pbp ;; e7) echo kvm ;; 60) echo input ;; *) log "no m1ddc name for $1"; exit 1 ;; esac; }
+  # shellcheck disable=SC2086
+  vcp_get() { m1ddc $M1DDC_DISPLAY get "$(m1name "$1")"; }
+  # shellcheck disable=SC2086
+  vcp_set() { m1ddc $M1DDC_DISPLAY set "$(m1name "$1")" $(( $2 )) >/dev/null; }
+  OTHER_INPUT=$LINUX_INPUT; OTHER_NAME=Linux
+else
+  log "unsupported OS: $OS"; exit 1
+fi
+
+# Does *this* machine currently own the monitor's USB hub?
+owns_usb() {
+  case $OS in
+    Linux)  lsusb -d 0bda:5409 >/dev/null 2>&1 || lsusb -d 0bda:0409 >/dev/null 2>&1 ;;
+    Darwin) ioreg -p IOUSB -l -w0 2>/dev/null | grep -q '"idProduct" = 21513' ;;  # 0bda:5409 monitor hub
+  esac
+}
+
+cmd_status() {
+  local pbp input
+  pbp=$(vcp_get e9); input=$(vcp_get 60)
+  printf 'PBP:   %s (0x%02x)\n' "$([[ $pbp -ne 0 ]] && echo on || echo off)" "$pbp"
+  printf 'Input: 0x%02x (%s)\n' "$input" \
+    "$( (( input == LINUX_INPUT )) && echo Linux || { (( input == MAC_INPUT )) && echo Mac || echo other; })"
+  printf 'USB:   %s\n' "$(owns_usb && echo "this machine ($OS)" || echo "the other machine")"
+}
+
+cmd_toggle() {
+  local pbp
+  pbp=$(vcp_get e9)
+  if (( pbp != 0 )); then
+    vcp_set e7 "$KVM_TOGGLE"
+    notify "PBP: keyboard/mouse → $OTHER_NAME"
+  else
+    vcp_set 60 "$OTHER_INPUT"
+    notify "Screen + keyboard → $OTHER_NAME"
+  fi
+}
+
+# Ignore key-repeat / double presses while a switch is in flight.
+LOCK=${TMPDIR:-/tmp}/kvm-switch.$(id -u).lock
+exec 9>"$LOCK"
+if command -v flock >/dev/null; then flock -n 9 || exit 0; fi
+
+case ${1:-toggle} in
+  toggle) cmd_toggle ;;
+  status) cmd_status ;;
+  *) echo "usage: kvm-switch [toggle|status]" >&2; exit 2 ;;
+esac
