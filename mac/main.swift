@@ -199,7 +199,9 @@ final class Monitor {
                 if pbp & 0xFF != 0 {
                     msg = d.write(vcpKVM, kvmToggle) ? "PBP: keyboard/mouse toggled" : "KVM write failed"
                 } else {
-                    msg = d.write(vcpInput, linuxInput) ? "Switched input to Linux" : "Input write failed"
+                    let cur = (d.read(vcpInput) ?? 0) & 0xFF
+                    let target = cur == linuxInput ? macInput : linuxInput
+                    msg = d.write(vcpInput, target) ? "Switched input to \(target == linuxInput ? "Linux" : "Mac")" : "Input write failed"
                 }
             } else {
                 msg = "Monitor not reachable over DDC"
