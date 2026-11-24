@@ -22,6 +22,10 @@ let vcpPBP: UInt8 = 0xE9
 let kvmToggle: UInt16 = 0xFF00
 let hubVendor = 0x0BDA, hubProduct = 0x5409 // monitor's USB hub (Realtek)
 
+let readWriteCycles = Int(ProcessInfo.processInfo.environment["KVM_CYCLES"] ?? "") ?? 2
+let debug = ProcessInfo.processInfo.environment["KVM_DEBUG"] != nil
+func dbg(_ s: @autoclosure () -> String) { if debug { FileHandle.standardError.write((s() + "\n").data(using: .utf8)!) } }
+
 // MARK: - IOAVService (private IOKit API)
 
 typealias CreateFn = @convention(c) (CFAllocator?, io_service_t) -> Unmanaged<CFTypeRef>?
@@ -57,6 +61,7 @@ final class DDC {
             defer { IOObjectRelease(entry) }
             let loc = IORegistryEntryCreateCFProperty(entry, "Location" as CFString, kCFAllocatorDefault, 0)?
                 .takeRetainedValue() as? String
+            dbg("DCPAVServiceProxy entry \(entry): Location=\(loc ?? "nil")")
             guard loc == "External", let av = create(kCFAllocatorDefault, entry)?.takeRetainedValue() else { continue }
             out.append(DDC(av))
         }
@@ -70,11 +75,13 @@ final class DDC {
         guard let write = AV.write else { return false }
         var p: [UInt8] = [0x84, 0x03, vcp, UInt8(value >> 8), UInt8(value & 0xFF), 0]
         p[5] = DDC.checksum(0x6E ^ 0x51, p[0..<5])
-        for _ in 0..<3 {
+        let cycles = Int(ProcessInfo.processInfo.environment["KVM_WCYCLES"] ?? "") ?? 2
+        var ok = false
+        for _ in 0..<cycles {
             usleep(10_000)
-            if write(service, 0x37, 0x51, &p, UInt32(p.count)) == kIOReturnSuccess { return true }
+            ok = write(service, 0x37, 0x51, &p, UInt32(p.count)) == kIOReturnSuccess
         }
-        return false
+        return ok
     }
 
     func read(_ vcp: UInt8) -> UInt16? {
@@ -82,10 +89,19 @@ final class DDC {
         for _ in 0..<4 {
             var p: [UInt8] = [0x82, 0x01, vcp, 0]
             p[3] = DDC.checksum(0x6E ^ 0x51, p[0..<3])
-            guard write(service, 0x37, 0x51, &p, UInt32(p.count)) == kIOReturnSuccess else { usleep(20_000); continue }
-            usleep(40_000)
+            // MonitorControl sends the request twice; some monitors drop the first one.
+            var wr = kIOReturnSuccess
+            for c in 0..<readWriteCycles {
+                if c > 0 { usleep(10_000) }
+                wr = write(service, 0x37, 0x51, &p, UInt32(p.count))
+            }
+            dbg("read 0x\(String(vcp, radix: 16)): write request -> \(String(format: "0x%08x", wr))")
+            guard wr == kIOReturnSuccess else { usleep(20_000); continue }
+            usleep(UInt32(ProcessInfo.processInfo.environment["KVM_DELAY_MS"].flatMap(Int.init) ?? 40) * 1000)
             var r = [UInt8](repeating: 0, count: 11)
-            guard read(service, 0x37, 0x51, &r, UInt32(r.count)) == kIOReturnSuccess else { continue }
+            let rr = read(service, 0x37, 0x51, &r, UInt32(r.count))
+            dbg("  read reply -> \(String(format: "0x%08x", rr)) bytes \(r.map { String(format: "%02x", $0) }.joined(separator: " "))")
+            guard rr == kIOReturnSuccess else { continue }
             // r: [src, len, 0x02 opcode, result, vcp, type, maxHi, maxLo, curHi, curLo, checksum]
             guard r[2] == 0x02, r[3] == 0x00, r[4] == vcp, DDC.checksum(0x50, r[0..<10]) == r[10] else { continue }
             return UInt16(r[8]) << 8 | UInt16(r[9])
@@ -245,6 +261,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.appearsDisabled = true
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.item.button?.appearsDisabled = false }
     }
+}
+
+// CLI mode: "KVM Switch.app/Contents/MacOS/KVMSwitch --status | --toggle"
+let args = CommandLine.arguments.dropFirst()
+if args.first == "--read" {  // debug: --read 10 e9 e7 ...
+    guard let d = DDC.externalDisplays().first else { exit(1) }
+    for h in args.dropFirst() {
+        let v = d.read(UInt8(h, radix: 16)!)
+        print(h, v.map { String(format: "0x%04X", $0) } ?? "null")
+        usleep(200_000)
+    }
+    exit(0)
+}
+if args.first == "--kvm" {  // blind KVM toggle on every external display, no reads
+    let ds = DDC.externalDisplays()
+    for d in ds { print("write E7=FF00:", d.write(vcpKVM, kvmToggle) ? "ok" : "failed") }
+    exit(ds.isEmpty ? 1 : 0)
+}
+if let cmd = args.first, cmd == "--status" || cmd == "--toggle" {
+    let m = Monitor()
+    if cmd == "--toggle" {
+        m.toggle { print($0); exit(0) }
+    } else {
+        m.state { s in
+            guard let s else { print("Monitor not reachable over DDC"); exit(1) }
+            print(String(format: "PBP:   %@\nInput: 0x%02X\nUSB:   %@", s.pbp ? "on" : "off", s.input,
+                         s.usbHere ? "this machine (Mac)" : "the other machine"))
+            exit(0)
+        }
+    }
+    dispatchMain()
 }
 
 let app = NSApplication.shared

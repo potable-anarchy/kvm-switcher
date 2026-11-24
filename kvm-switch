@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # kvm-switch — hand the Alienware AW3926QW's keyboard/mouse (and, if needed,
-# the screen) to the *other* computer. Same script on Linux and macOS.
+# the screen) to the *other* computer. Linux side; the Mac uses mac/ (KVM Switch.app).
 #
 #   kvm-switch            toggle to the other machine (bind this to a hotkey)
 #   kvm-switch status     show PBP state, active input, and who owns USB
@@ -18,7 +18,6 @@ LINUX_INPUT=${KVM_LINUX_INPUT:-0x0f}   # DisplayPort-1
 MAC_INPUT=${KVM_MAC_INPUT:-0x1b}       # USB-C
 KVM_TOGGLE=0xff00
 MODEL=${KVM_MODEL:-AW3926QW}
-M1DDC_DISPLAY=${KVM_M1DDC_DISPLAY:-}   # e.g. "display 2" if the Mac has several monitors
 
 OS=$(uname -s)
 log() { echo "kvm-switch: $*" >&2; }
@@ -26,7 +25,6 @@ log() { echo "kvm-switch: $*" >&2; }
 notify() {
   case $OS in
     Linux)  command -v notify-send >/dev/null && notify-send -a kvm-switch -t 1500 "KVM" "$1" || true ;;
-    Darwin) osascript -e "display notification \"$1\" with title \"KVM\"" >/dev/null 2>&1 || true ;;
   esac
 }
 
@@ -61,15 +59,7 @@ if [[ $OS == Linux ]]; then
   vcp_set() { ddc setvcp "$1" "$2"; }
   OTHER_INPUT=$MAC_INPUT; OTHER_NAME=Mac
 elif [[ $OS == Darwin ]]; then
-  export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"   # hotkey daemons get a bare PATH
-  command -v m1ddc >/dev/null || { log "m1ddc not found (brew install m1ddc)"; exit 1; }
-  # m1ddc only knows named controls; map the codes we use.
-  m1name() { case $1 in e9) echo pbp ;; e7) echo kvm ;; 60) echo input ;; *) log "no m1ddc name for $1"; exit 1 ;; esac; }
-  # shellcheck disable=SC2086
-  vcp_get() { m1ddc $M1DDC_DISPLAY get "$(m1name "$1")"; }
-  # shellcheck disable=SC2086
-  vcp_set() { m1ddc $M1DDC_DISPLAY set "$(m1name "$1")" $(( $2 )) >/dev/null; }
-  OTHER_INPUT=$LINUX_INPUT; OTHER_NAME=Linux
+  log "on macOS use the KVM Switch app (see README)"; exit 1
 else
   log "unsupported OS: $OS"; exit 1
 fi
@@ -78,7 +68,6 @@ fi
 owns_usb() {
   case $OS in
     Linux)  lsusb -d 0bda:5409 >/dev/null 2>&1 || lsusb -d 0bda:0409 >/dev/null 2>&1 ;;
-    Darwin) ioreg -p IOUSB -l -w0 2>/dev/null | grep -q '"idProduct" = 21513' ;;  # 0bda:5409 monitor hub
   esac
 }
 
