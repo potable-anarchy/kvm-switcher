@@ -1,0 +1,17 @@
+{
+    "KPlugin": {
+        "Id": "io.github.potable-anarchy.kvmswitch",
+        "Name": "KVM Switch",
+        "Description": "Hand the monitor's keyboard and mouse to the other computer",
+        "Icon": "view-split-left-right",
+        "Authors": [{ "Name": "potable-anarchy" }],
+        "Category": "System Information",
+        "Version": "0.2.0",
+        "Website": "https://github.com/potable-anarchy/kvm-switcher",
+        "EnabledByDefault": true
+    },
+    "KPackageStructure": "Plasma/Applet",
+    "X-Plasma-API-Minimum-Version": "6.0",
+    "X-Plasma-NotificationArea": "true",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}

@@ -30,8 +30,14 @@ Command-line use: `"/Applications/KVM Switch.app/Contents/MacOS/KVMSwitch" --sta
 
 ## Linux (KDE Plasma 6)
 
-`./install-linux.sh` installs `kvm-switch` to `~/.local/bin` and binds the hotkey. It needs `ddcutil` and
-read/write access to `/dev/i2c-*`. Run `kvm-switch status` to see the current state.
+`./install-linux.sh` installs `kvm-switch` to `~/.local/bin`, binds the hotkey, and adds a
+**system tray widget**. It needs `ddcutil` and read/write access to `/dev/i2c-*`.
+
+The tray icon is bright when this machine has the keyboard and mouse, and dimmed when the other
+computer does. Click it for status (PBP, main input, owner) and a Switch button. Middle-click
+switches right away. Tray widgets come back on every login, so there's no separate launch-at-login option.
+
+From the command line: `kvm-switch status` (or `status --kv`), `kvm-switch owner`, and `kvm-switch toggle`.
 
 ## Monitor registers (found by probing)
 

@@ -3,7 +3,8 @@
 # the screen) to the *other* computer. Linux side; the Mac uses mac/ (KVM Switch.app).
 #
 #   kvm-switch            toggle to the other machine (bind this to a hotkey)
-#   kvm-switch status     show PBP state, active input, and who owns USB
+#   kvm-switch status     show PBP state, active input, and who owns USB (--kv: key=value)
+#   kvm-switch owner      "here" or "other": who owns the monitor's USB (no DDC)
 #
 # How it works (DDC/CI, discovered on this monitor):
 #   VCP 0xE9  PBP mode   0x00 = off, non-zero (0x24) = PBP on
@@ -71,16 +72,27 @@ owns_usb() {
   esac
 }
 
+input_name() {
+  if (( $1 == LINUX_INPUT )); then echo Linux; elif (( $1 == MAC_INPUT )); then echo Mac; else printf '0x%02x' "$1"; fi
+}
+
 cmd_status() {
-  local pbp input
-  pbp=$(vcp_get e9); input=$(vcp_get 60)
-  printf 'PBP:   %s (0x%02x)\n' "$([[ $pbp -ne 0 ]] && echo on || echo off)" "$pbp"
-  printf 'Input: 0x%02x (%s)\n' "$input" \
-    "$( (( input == LINUX_INPUT )) && echo Linux || { (( input == MAC_INPUT )) && echo Mac || echo other; })"
-  printf 'USB:   %s\n' "$(owns_usb && echo "this machine ($OS)" || echo "the other machine")"
+  local pbp input usb
+  pbp=$(vcp_get e9); input=$(( $(vcp_get 60) & 0xff ))
+  usb=$(owns_usb && echo here || echo other)
+  if [[ ${1:-} == --kv ]]; then   # machine-readable, for the Plasma widget
+    printf 'pbp=%s\ninput=%s\nusb=%s\n' "$( (( pbp != 0 )) && echo on || echo off)" "$(input_name "$input")" "$usb"
+    return
+  fi
+  printf 'PBP:   %s (0x%02x)\n' "$( (( pbp != 0 )) && echo on || echo off)" "$pbp"
+  printf 'Input: 0x%02x (%s)\n' "$input" "$(input_name "$input")"
+  printf 'USB:   %s\n' "$([[ $usb == here ]] && echo "this machine ($OS)" || echo "the other machine")"
 }
 
 cmd_toggle() {
+  # Ignore key-repeat / double presses while a switch is in flight.
+  exec 9>"${TMPDIR:-/tmp}/kvm-switch.$(id -u).lock"
+  if command -v flock >/dev/null; then flock -n 9 || exit 0; fi
   local pbp
   pbp=$(vcp_get e9)
   if (( pbp != 0 )); then
@@ -92,13 +104,9 @@ cmd_toggle() {
   fi
 }
 
-# Ignore key-repeat / double presses while a switch is in flight.
-LOCK=${TMPDIR:-/tmp}/kvm-switch.$(id -u).lock
-exec 9>"$LOCK"
-if command -v flock >/dev/null; then flock -n 9 || exit 0; fi
-
 case ${1:-toggle} in
   toggle) cmd_toggle ;;
-  status) cmd_status ;;
-  *) echo "usage: kvm-switch [toggle|status]" >&2; exit 2 ;;
+  status) cmd_status "${2:-}" ;;
+  owner)  owns_usb && echo here || echo other ;;   # no DDC; cheap enough to poll
+  *) echo "usage: kvm-switch [toggle|status [--kv]|owner]" >&2; exit 2 ;;
 esac

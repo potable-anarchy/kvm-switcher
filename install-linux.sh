@@ -39,3 +39,11 @@ call doRegister "$ACTION"
 # flags 6 = SetPresent|NoAutoloading; without SetPresent the action stays inactive.
 call setShortcutKeys "$ACTION" "[([$KEY, 0, 0, 0],)]" 6
 echo "bound Ctrl+Alt+Meta+K → $BIN"
+
+# System tray widget (shows who owns the keyboard; click for status, middle-click to switch).
+if kpackagetool6 -t Plasma/Applet -s io.github.potable-anarchy.kvmswitch >/dev/null 2>&1; then
+  kpackagetool6 -t Plasma/Applet -u plasmoid
+else
+  kpackagetool6 -t Plasma/Applet -i plasmoid
+fi
+echo "installed tray widget (appears in the system tray; restart plasmashell if it doesn't)"
