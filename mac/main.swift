@@ -199,7 +199,11 @@ final class Monitor {
                 if pbp & 0xFF != 0 {
                     msg = d.write(vcpKVM, kvmToggle) ? "PBP: keyboard/mouse toggled" : "KVM write failed"
                 } else {
-                    msg = d.write(vcpInput, linuxInput) ? "Switched input to Linux" : "Input write failed"
+                    // Flip relative to what's on screen: a laptop's own keyboard can press this
+                    // while Linux is showing, so "the other computer" isn't always Linux.
+                    let cur = (d.read(vcpInput) ?? 0) & 0xFF
+                    let target = cur == linuxInput ? macInput : linuxInput
+                    msg = d.write(vcpInput, target) ? "Switched input to \(target == linuxInput ? "Linux" : "Mac")" : "Input write failed"
                 }
             } else {
                 msg = "Monitor not reachable over DDC"

@@ -108,8 +108,12 @@ cmd_toggle() {
     vcp_set e7 "$KVM_TOGGLE"
     notify "PBP: keyboard/mouse → $OTHER_NAME"
   else
-    vcp_set 60 "$OTHER_INPUT"
-    notify "Screen + keyboard → $OTHER_NAME"
+    # Flip relative to what's on screen (a keyboard not on the monitor's hub can press
+    # this while the other machine is showing).
+    local target=$OTHER_INPUT
+    (( ($(vcp_get 60) & 0xff) == OTHER_INPUT )) && target=$SELF_INPUT
+    vcp_set 60 "$target"
+    notify "Screen + keyboard → $(input_name "$target")"
   fi
 }
 
