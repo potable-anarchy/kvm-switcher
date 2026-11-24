@@ -6,7 +6,7 @@
         "Icon": "view-split-left-right",
         "Authors": [{ "Name": "potable-anarchy" }],
         "Category": "System Information",
-        "Version": "0.2.0",
+        "Version": "0.3.0",
         "Website": "https://github.com/potable-anarchy/kvm-switcher",
         "EnabledByDefault": true
     },

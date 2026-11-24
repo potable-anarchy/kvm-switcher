@@ -1,15 +1,15 @@
 # kvm-switch
 
-One hotkey on both machines hands the Alienware AW3926QW's keyboard and mouse
-to the other computer: **Ctrl+Alt+Super+K** on Linux, **Ctrl+Option+Cmd+K** on
-the Mac (the same physical keys).
+The same physical keys on both machines (Ctrl+Alt+Super on Linux, Ctrl+Option+Cmd on the Mac) control
+the Alienware AW3926QW's KVM and PBP:
 
-It checks whether the monitor is in PBP first:
-
-| Monitor state | What the key does |
+| Key | What it does |
 |---|---|
-| PBP on | Toggles the USB/KVM only (VCP `0xE7 = 0xFF00`). Both pictures stay on screen. |
-| PBP off | Switches the input to the other machine (VCP `0x60`), and the KVM follows. |
+| **…+K** | Hand the keyboard and mouse to the other computer. With PBP on, only the USB/KVM moves (VCP `0xE7 = 0xFF00`) and both pictures stay up. With PBP off, the input switches (VCP `0x60`) and the KVM follows it. |
+| **…+P** | Toggle PBP (VCP `0xE9`). Turning it off puts the machine you pressed it on full-screen. |
+
+Both apps also have a **Switch Input (DP ↔ USB-C)** button for a full-screen switch. It's disabled
+while PBP is on, because the monitor reports PBP state.
 
 ## Mac: KVM Switch.app
 
@@ -26,7 +26,7 @@ swallows DDC, and the monitor's USB has no path to the Mac.
 
 To build it yourself on a Mac: `mac/build.sh`, which writes `build/KVM Switch.app`. It only needs the Xcode command line tools.
 
-Command-line use: `"/Applications/KVM Switch.app/Contents/MacOS/KVMSwitch" --status | --toggle`
+Command-line use: `"/Applications/KVM Switch.app/Contents/MacOS/KVMSwitch" --status | --toggle | --pbp | --input`
 
 ## Linux (KDE Plasma 6)
 
@@ -34,17 +34,18 @@ Command-line use: `"/Applications/KVM Switch.app/Contents/MacOS/KVMSwitch" --sta
 **system tray widget**. It needs `ddcutil` and read/write access to `/dev/i2c-*`.
 
 The tray icon is bright when this machine has the keyboard and mouse, and dimmed when the other
-computer does. Click it for status (PBP, main input, owner) and a Switch button. Middle-click
-switches right away. Tray widgets come back on every login, so there's no separate launch-at-login option.
+computer does. Click it for status (PBP, main input, owner) and buttons to switch, toggle PBP, and
+switch input. Middle-click switches right away. Tray widgets come back on every login, so there's no separate launch-at-login option.
 
-From the command line: `kvm-switch status` (or `status --kv`), `kvm-switch owner`, and `kvm-switch toggle`.
+From the command line: `kvm-switch toggle`, `kvm-switch pbp [toggle|on|off]`, `kvm-switch input [toggle|linux|mac]`,
+`kvm-switch status [--kv]`, and `kvm-switch owner`.
 
 ## Monitor registers (found by probing)
 
 | VCP | Meaning |
 |---|---|
 | `0x60` | Input: `0x0f` DisplayPort-1 (Linux), `0x1b` USB-C (Mac), `0x11`/`0x12` HDMI. Read from the Mac in PBP, it returns `0x1B0F` (both inputs). |
-| `0xE9` | PBP mode: `0x00` off, `0x24` on |
+| `0xE9` | PBP mode: `0x00` off, `0x24` on. Writable. With PBP off, the main input (DP) goes full-screen. |
 | `0xE7` | Write `0xFF00` to toggle the KVM (write-only; always reads `0x1500`) |
 
 On the USB-C input, the monitor drops the first DDC message of each exchange. The Mac app

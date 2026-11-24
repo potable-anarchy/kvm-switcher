@@ -5,6 +5,10 @@
 #   kvm-switch            toggle to the other machine (bind this to a hotkey)
 #   kvm-switch status     show PBP state, active input, and who owns USB (--kv: key=value)
 #   kvm-switch owner      "here" or "other": who owns the monitor's USB (no DDC)
+#   kvm-switch pbp [toggle|on|off]
+#                         PBP on/off. Turning it off also puts *this* machine full-screen.
+#   kvm-switch input [toggle|linux|mac]
+#                         full-screen input switch (DP <-> USB-C); refused while PBP is on
 #
 # How it works (DDC/CI, discovered on this monitor):
 #   VCP 0xE9  PBP mode   0x00 = off, non-zero (0x24) = PBP on
@@ -13,6 +17,7 @@
 #
 # PBP on  -> toggle the KVM only; both pictures stay on screen.
 # PBP off -> switch the input to the other machine; the KVM follows it.
+#   VCP 0xE9 is writable: 0x00 = PBP off (main input full-screen), 0x24 = PBP on.
 set -euo pipefail
 
 LINUX_INPUT=${KVM_LINUX_INPUT:-0x0f}   # DisplayPort-1
@@ -58,7 +63,7 @@ if [[ $OS == Linux ]]; then
     echo $(( 16#${hi#x} * 256 + 16#${lo#x} ))
   }
   vcp_set() { ddc setvcp "$1" "$2"; }
-  OTHER_INPUT=$MAC_INPUT; OTHER_NAME=Mac
+  OTHER_INPUT=$MAC_INPUT; OTHER_NAME=Mac; SELF_INPUT=$LINUX_INPUT
 elif [[ $OS == Darwin ]]; then
   log "on macOS use the KVM Switch app (see README)"; exit 1
 else
@@ -89,10 +94,14 @@ cmd_status() {
   printf 'USB:   %s\n' "$([[ $usb == here ]] && echo "this machine ($OS)" || echo "the other machine")"
 }
 
-cmd_toggle() {
+lock() {
   # Ignore key-repeat / double presses while a switch is in flight.
   exec 9>"${TMPDIR:-/tmp}/kvm-switch.$(id -u).lock"
   if command -v flock >/dev/null; then flock -n 9 || exit 0; fi
+}
+
+cmd_toggle() {
+  lock
   local pbp
   pbp=$(vcp_get e9)
   if (( pbp != 0 )); then
@@ -104,9 +113,42 @@ cmd_toggle() {
   fi
 }
 
+cmd_pbp() {
+  lock
+  local want=${1:-toggle}
+  if [[ $want == toggle ]]; then (( $(vcp_get e9) != 0 )) && want=off || want=on; fi
+  case $want in
+    on)  vcp_set e9 0x24; notify "PBP on" ;;
+    off) vcp_set e9 0x00
+         sleep 1
+         vcp_set 60 "$SELF_INPUT"   # land full-screen on the machine you pressed it on
+         notify "PBP off" ;;
+    *) echo "usage: kvm-switch pbp [toggle|on|off]" >&2; exit 2 ;;
+  esac
+}
+
+cmd_input() {
+  lock
+  if (( $(vcp_get e9) != 0 )); then
+    log "PBP is on; input switching is disabled (use 'kvm-switch pbp off' first)"
+    notify "Input switch disabled while PBP is on"; exit 3
+  fi
+  local target
+  case ${1:-toggle} in
+    toggle) (( ($(vcp_get 60) & 0xff) == LINUX_INPUT )) && target=$MAC_INPUT || target=$LINUX_INPUT ;;
+    linux)  target=$LINUX_INPUT ;;
+    mac)    target=$MAC_INPUT ;;
+    *) echo "usage: kvm-switch input [toggle|linux|mac]" >&2; exit 2 ;;
+  esac
+  vcp_set 60 "$target"
+  notify "Screen + keyboard → $(input_name "$target")"
+}
+
 case ${1:-toggle} in
   toggle) cmd_toggle ;;
   status) cmd_status "${2:-}" ;;
   owner)  owns_usb && echo here || echo other ;;   # no DDC; cheap enough to poll
-  *) echo "usage: kvm-switch [toggle|status [--kv]|owner]" >&2; exit 2 ;;
+  pbp)    cmd_pbp "${2:-}" ;;
+  input)  cmd_input "${2:-}" ;;
+  *) echo "usage: kvm-switch [toggle|status [--kv]|owner|pbp [toggle|on|off]|input [toggle|linux|mac]]" >&2; exit 2 ;;
 esac

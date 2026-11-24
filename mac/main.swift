@@ -16,6 +16,8 @@ import ServiceManagement
 
 let defaults = UserDefaults.standard
 var linuxInput: UInt16 { UInt16(defaults.object(forKey: "linuxInput") as? Int ?? 0x0F) } // DisplayPort-1
+var macInput: UInt16 { UInt16(defaults.object(forKey: "macInput") as? Int ?? 0x1B) }     // USB-C
+let pbpOnValue: UInt16 = 0x24
 let vcpInput: UInt8 = 0x60
 let vcpKVM: UInt8 = 0xE7
 let vcpPBP: UInt8 = 0xE9
@@ -148,6 +150,44 @@ final class Monitor {
         }
     }
 
+    /// Run `body` on the DDC queue, one command at a time; report its message on the main queue.
+    private func run(_ done: @escaping (String) -> Void, _ body: @escaping (DDC) -> String) {
+        queue.async {
+            if self.busy { return }
+            self.busy = true
+            defer { self.busy = false }
+            let msg = self.display().map(body) ?? "Monitor not reachable over DDC"
+            DispatchQueue.main.async { done(msg) }
+        }
+    }
+
+    /// PBP on <-> off. Turning it off also puts this Mac full-screen (otherwise the main input,
+    /// Linux, would take the screen and the keyboard with it).
+    func togglePBP(_ done: @escaping (String) -> Void) {
+        run(done) { d in
+            guard let pbp = d.read(vcpPBP) else { return "Couldn't read PBP state" }
+            if pbp & 0xFF == 0 { return d.write(vcpPBP, pbpOnValue) ? "PBP on" : "PBP write failed" }
+            guard d.write(vcpPBP, 0x00) else { return "PBP write failed" }
+            // The display re-syncs after PBP changes; retry (re-finding the display) for a few seconds.
+            for _ in 0..<6 {
+                usleep(500_000)
+                if let dd = self.display(), dd.write(vcpInput, macInput) { return "PBP off · screen on this Mac" }
+            }
+            return "PBP off (couldn't switch input to this Mac)"
+        }
+    }
+
+    /// Full-screen input switch DP <-> USB-C. Refused while PBP is on.
+    func switchInput(_ done: @escaping (String) -> Void) {
+        run(done) { d in
+            guard let pbp = d.read(vcpPBP) else { return "Couldn't read PBP state" }
+            if pbp & 0xFF != 0 { return "Input switch is disabled while PBP is on" }
+            let cur = (d.read(vcpInput) ?? 0) & 0xFF
+            let target = cur == linuxInput ? macInput : linuxInput
+            return d.write(vcpInput, target) ? "Input → \(target == linuxInput ? "Linux" : "Mac")" : "Input write failed"
+        }
+    }
+
     /// Hand keyboard/mouse (and the screen if PBP is off) to the other machine.
     func toggle(_ done: @escaping (String) -> Void) {
         queue.async {
@@ -169,21 +209,34 @@ final class Monitor {
     }
 }
 
-// MARK: - Hotkey (Carbon: works without Accessibility permission)
+// MARK: - Hotkeys (Carbon: works without Accessibility permission)
 
-final class HotKey {
-    private var ref: EventHotKeyRef?
-    static var onPress: (() -> Void)?
+final class HotKeys {
+    private static var handlers: [UInt32: () -> Void] = [:]
+    private var refs: [EventHotKeyRef?] = []
+    private var installed = false
 
-    func register() -> Bool {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { _, _, _ in
-            DispatchQueue.main.async { HotKey.onPress?() }
-            return noErr
-        }, 1, &spec, nil, nil)
-        let id = EventHotKeyID(signature: OSType(0x4B56_4D53), id: 1) // 'KVMS'
-        let mods = UInt32(controlKey | optionKey | cmdKey)
-        return RegisterEventHotKey(UInt32(kVK_ANSI_K), mods, id, GetApplicationEventTarget(), 0, &ref) == noErr
+    /// Register Ctrl+Option+Cmd+<key>. Returns false if another app already owns it.
+    func register(id: UInt32, key: Int, _ handler: @escaping () -> Void) -> Bool {
+        if !installed {
+            installed = true
+            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { _, event, _ in
+                var hk = EventHotKeyID()
+                GetEventParameter(event, EventParamName(kEventParamDirectObject), EventParamType(typeEventHotKeyID),
+                                  nil, MemoryLayout<EventHotKeyID>.size, nil, &hk)
+                let id = hk.id
+                DispatchQueue.main.async { HotKeys.handlers[id]?() }
+                return noErr
+            }, 1, &spec, nil, nil)
+        }
+        HotKeys.handlers[id] = handler
+        var ref: EventHotKeyRef?
+        let hkid = EventHotKeyID(signature: OSType(0x4B56_4D53), id: id) // 'KVMS'
+        let ok = RegisterEventHotKey(UInt32(key), UInt32(controlKey | optionKey | cmdKey), hkid,
+                                     GetApplicationEventTarget(), 0, &ref) == noErr
+        refs.append(ref)
+        return ok
     }
 }
 
@@ -191,11 +244,13 @@ final class HotKey {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let monitor = Monitor()
-    let hotKey = HotKey()
+    let hotKeys = HotKeys()
     var item: NSStatusItem!
     let statusLine = NSMenuItem(title: "Checking monitor…", action: nil, keyEquivalent: "")
     let lastAction = NSMenuItem(title: "", action: nil, keyEquivalent: "")
     let loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
+    let pbpItem = NSMenuItem(title: "Toggle PBP", action: #selector(togglePBP), keyEquivalent: "p")
+    let inputItem = NSMenuItem(title: "Switch Input (DP ↔ USB-C)", action: #selector(switchInput), keyEquivalent: "")
 
     func applicationDidFinishLaunching(_: Notification) {
         item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -205,24 +260,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let menu = NSMenu()
         menu.delegate = self
+        menu.autoenablesItems = false   // we enable/disable items from the monitor's PBP state
         statusLine.isEnabled = false
         lastAction.isEnabled = false
         lastAction.isHidden = true
         let sw = NSMenuItem(title: "Switch to Other Computer", action: #selector(switchNow), keyEquivalent: "k")
         sw.keyEquivalentModifierMask = [.control, .option, .command]
-        for i in [sw, loginItem] { i.target = self }
+        pbpItem.keyEquivalentModifierMask = [.control, .option, .command]
+        for i in [sw, pbpItem, inputItem, loginItem] { i.target = self }
         menu.addItem(statusLine)
         menu.addItem(lastAction)
         menu.addItem(.separator())
         menu.addItem(sw)
+        menu.addItem(pbpItem)
+        menu.addItem(inputItem)
         menu.addItem(.separator())
         menu.addItem(loginItem)
         menu.addItem(NSMenuItem(title: "Quit KVM Switch", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         item.menu = menu
 
-        HotKey.onPress = { [weak self] in self?.switchNow() }
-        if !hotKey.register() {
+        if !hotKeys.register(id: 1, key: kVK_ANSI_K, { [weak self] in self?.switchNow() }) {
             show("⌃⌥⌘K is taken by another app")
+        }
+        if !hotKeys.register(id: 2, key: kVK_ANSI_P, { [weak self] in self?.togglePBP() }) {
+            show("⌃⌥⌘P is taken by another app")
         }
     }
 
@@ -232,6 +293,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         monitor.state { [weak self] s in
             guard let self else { return }
             guard let s else { self.statusLine.title = "Monitor not reachable over DDC"; return }
+            self.pbpItem.title = s.pbp ? "Turn PBP Off" : "Turn PBP On"
+            self.inputItem.isEnabled = !s.pbp
+            self.inputItem.title = s.pbp ? "Switch Input (disabled while PBP is on)"
+                : (s.input == linuxInput ? "Switch Input to USB-C (Mac)" : "Switch Input to DisplayPort (Linux)")
             let input = s.input == linuxInput ? "Linux" : (s.input == 0x1B ? "Mac" : String(format: "0x%02X", s.input))
             self.statusLine.title = "PBP \(s.pbp ? "on" : "off") · input \(input) · keyboard \(s.usbHere ? "here" : "on other computer")"
         }
@@ -240,6 +305,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func switchNow() {
         flash()
         monitor.toggle { [weak self] msg in self?.show(msg) }
+    }
+
+    @objc func togglePBP() {
+        flash()
+        monitor.togglePBP { [weak self] msg in self?.show(msg) }
+    }
+
+    @objc func switchInput() {
+        flash()
+        monitor.switchInput { [weak self] msg in self?.show(msg) }
     }
 
     @objc func toggleLogin() {
@@ -263,7 +338,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 }
 
-// CLI mode: "KVM Switch.app/Contents/MacOS/KVMSwitch --status | --toggle"
+// CLI mode: "KVM Switch.app/Contents/MacOS/KVMSwitch --status | --toggle | --pbp | --input"
 let args = CommandLine.arguments.dropFirst()
 if args.first == "--read" {  // debug: --read 10 e9 e7 ...
     guard let d = DDC.externalDisplays().first else { exit(1) }
@@ -279,10 +354,14 @@ if args.first == "--kvm" {  // blind KVM toggle on every external display, no re
     for d in ds { print("write E7=FF00:", d.write(vcpKVM, kvmToggle) ? "ok" : "failed") }
     exit(ds.isEmpty ? 1 : 0)
 }
-if let cmd = args.first, cmd == "--status" || cmd == "--toggle" {
+if let cmd = args.first, ["--status", "--toggle", "--pbp", "--input"].contains(cmd) {
     let m = Monitor()
     if cmd == "--toggle" {
         m.toggle { print($0); exit(0) }
+    } else if cmd == "--pbp" {
+        m.togglePBP { print($0); exit(0) }
+    } else if cmd == "--input" {
+        m.switchInput { print($0); exit(0) }
     } else {
         m.state { s in
             guard let s else { print("Monitor not reachable over DDC"); exit(1) }

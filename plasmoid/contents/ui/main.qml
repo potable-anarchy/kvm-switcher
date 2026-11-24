@@ -16,6 +16,8 @@ PlasmoidItem {
     readonly property string cmdOwner: bin + " owner"
     readonly property string cmdStatus: bin + " status --kv"
     readonly property string cmdToggle: bin + " toggle"
+    readonly property string cmdPbp: bin + " pbp"
+    readonly property string cmdInput: bin + " input"
 
     property bool usbHere: true
     property string pbp: "…"
@@ -51,18 +53,20 @@ PlasmoidItem {
                 else if (k === "input") input = v
                 else if (k === "usb") usbHere = (v === "here")
             })
-        } else if (source === cmdToggle) {
+        } else if (source === cmdToggle || source === cmdPbp || source === cmdInput) {
             busy = false
-            if (code !== 0) error = "Switch failed"
+            if (code !== 0) error = "Command failed"
             settle.restart()
         }
     }
 
-    function toggle() {
+    function run(cmd) {
         if (busy) return
         busy = true
-        exec.run(cmdToggle)
+        error = ""
+        exec.run(cmd)
     }
+    function toggle() { run(cmdToggle) }
 
     // Poll ownership (cheap, no DDC); fetch full status only while the popup is open.
     Timer {
@@ -115,15 +119,33 @@ PlasmoidItem {
 
         PlasmaComponents3.Button {
             Layout.fillWidth: true
-            text: root.busy ? "Switching…" : "Switch to Other Computer"
+            text: root.pbp === "off" ? "Switch Screen + Keyboard to Other Computer" : "Switch Keyboard to Other Computer"
             icon.name: "go-next"
             enabled: !root.busy
             onClicked: root.toggle()
         }
 
+        PlasmaComponents3.Button {
+            Layout.fillWidth: true
+            text: root.pbp === "on" ? "Turn PBP Off" : "Turn PBP On"
+            icon.name: "view-split-left-right"
+            enabled: !root.busy && (root.pbp === "on" || root.pbp === "off")
+            onClicked: root.run(root.cmdPbp)
+        }
+
+        PlasmaComponents3.Button {
+            Layout.fillWidth: true
+            text: root.input === "Linux" ? "Switch Input to USB-C (Mac)" : "Switch Input to DisplayPort (Linux)"
+            icon.name: "video-display"
+            // Input switching only makes sense full-screen; the monitor tells us if PBP is on.
+            enabled: !root.busy && root.pbp === "off"
+            onClicked: root.run(root.cmdInput)
+            PlasmaComponents3.ToolTip { text: root.pbp === "on" ? "Disabled while PBP is on" : "Full-screen input switch" }
+        }
+
         PlasmaComponents3.Label {
             Layout.alignment: Qt.AlignHCenter
-            text: "Hotkey: Ctrl+Alt+Meta+K · middle-click icon to switch"
+            text: "Ctrl+Alt+Meta+K switch · Ctrl+Alt+Meta+P PBP · middle-click icon to switch"
             font: Kirigami.Theme.smallFont
             opacity: 0.6
         }
